@@ -21,13 +21,6 @@ module.exports = (basePath, @extension) ->
 	console.log "[fmmodule] Target extension #{@extension}"
 
 	app = express()
-	# fu, ne krasivo
-	# app.use express.logger()
-
-	# redirect to path + /
-	app.get /[^\/]$/, (req, res) ->
-		console.log "[fmmodule] Redirect to " + req.path + "/"
-		res.redirect req.path + "/"
 
 	app.get "/*", (req, res) ->
 		console.log "[GET] to " + req.path
@@ -43,67 +36,73 @@ module.exports = (basePath, @extension) ->
 		requestedPath = path.normalize(@targetDirPath + req.path)
 
 		# check is requested path exists
-		if not fs.existsSync requestedPath
-			console.log "[handleRequest] Requested path not found: #{requestedPath}"
-			res.status(500).send "Requested path not found"
-			return
+		fs.exists requestedPath, (exists) ->
 
-		fs.lstat requestedPath, (err, stats) ->
-			if err?
-				console.log "[handleRequest] Failed to get stats of #{requestedPath} due to error - #{err}"
-				res.status(500).send "Failed to get stats of #{requestedPath} due to error - #{err}"
+			if not exists
+				msg = "Requested path not found: #{requestedPath}"
+				console.log "[handleRequest] #{msg}"
+				res.status(500).send msg
 				return
-			
-			# if requested path is file then send it
-			if stats.isFile()
-				res.status(200).download requestedPath
 
-			# if directory - read structure
-			else
+			fs.lstat requestedPath, (err, stats) ->
+				if err?
+					msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
+					console.error "[handleRequest] #{msg}"
+					res.status(500).send msg
+					return
+				
+				# if requested path is file then send it
+				if stats.isFile()
+					res.status(200).download requestedPath
 
-				children = []
-				fileCount = 0
-				fileExtensionCount = 0
-				fileExtensionSize = 0
+				# if directory - read structure
+				else
 
-				# how to sort files and sub directories
-				sortby = req.param "sortby"
-				sortorder = req.param "sortorder"
-
-				console.log "[readDirectory] read #{requestedPath}"
-				# read directory structure
-				getDirStat requestedPath, true, (params, err) ->
-
-					if err?
-						console.log "[readDirectory] Failed to get stats of #{requestedPath} due to error - #{err}"
-						res.status 500
-						res.send err
+					# if directory and request without / then redirect to path + /
+					if req.path.search(/.*\/$/) is -1
+						console.log "[handleRequest] Redirect to " + req.path + "/"
+						res.redirect req.path + "/"
 						return
 
-					result = sortAndRenderResult params, sortby, sortorder, requestedPath, req.path
+					# how to sort files and sub directories
+					sortby = req.param "sortby"
+					sortorder = req.param "sortorder"
 
-					res.status 200
-					res.send result
+					console.log "[readDirectory] read #{requestedPath}"
+					# read directory structure
+					getDirStat requestedPath, true, (err, params) ->
+
+						if err?
+							msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
+							console.error "[readDirectory] #{msg}"
+							res.status(500).send msg
+							return
+
+						result = sortAndRenderResult req.path, requestedPath, params, sortby, sortorder
+
+						res.status 200
+						res.send result
 
 ################################################################################################################################
-	sortAndRenderResult = ({children, size, fileCount, fileExtensionCount, fileExtensionSize}, sortby = "name", sortorder = "asc", requestedPath, path) ->
+	sortAndRenderResult = (path, requestedPath, {children, size, fileCount, fileExtensionCount, fileExtensionSize}, sortby = "name", sortorder = "asc") ->
 
 		result = switch sortby
 			when "name"
 				children.sort (a, b) ->
-					sortByName a, b
+					res = sortByName a, b
+					if sortorder is "asc" then res*1 else res*-1
 			when "time"
 				children.sort (a, b) ->
 					res = a.time.getDate() - b.time.getDate()
 					# if time is equal then sort by name
-					if res is 0 then sortByName a, b else res
+					res = if res is 0 then sortByName a, b else res
+					if sortorder is "asc" then res*1 else res*-1
 			when "size"
 				children.sort (a, b) ->
 					res = a.size - b.size
 					# if size is equal then sort by name
-					if res is 0 then sortByName a, b else res
-
-		resultOrdered = if sortorder is "asc" then result else result.reverse()
+					res = if res is 0 then sortByName a, b else res
+					if sortorder is "asc" then res*1 else res*-1
 		
 		sortToSend = if sortorder is "asc" then "desc" else "asc"
 
@@ -122,7 +121,7 @@ module.exports = (basePath, @extension) ->
 		if requestedPath isnt @targetDirPath
 			toSend += "<tr><td><a href=\"../\">..</a></td><td></td><td></td></tr>"
 
-		for instance in resultOrdered
+		for instance in result
 			if instance.isFile
 				toSend += "<tr><td><a href=\"#{instance.name}\">#{instance.name}</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
 			else
@@ -137,8 +136,8 @@ module.exports = (basePath, @extension) ->
 		return toSend
 ################################################################################################################################
 	sortByName = (a, b) ->
-		keyA = a.name
-		keyB = b.name
+		keyA = a.name.toLowerCase()
+		keyB = b.name.toLowerCase()
 		if keyA > keyB then 1 else if keyA < keyB then -1 else 0
 ################################################################################################################################
 	getDirStat = (dirPath, saveChildren, callback) ->
@@ -147,39 +146,59 @@ module.exports = (basePath, @extension) ->
 		fileExtensionCount = 0
 		fileExtensionSize = 0
 		size = 0
+		time = 0
+		isFile = false
 		instCalculated = 0
 		children = []
+		isFailed = false
 
-		# read directory structure
-		fs.readdir dirPath, (err, dir) ->
+		fs.lstat dirPath, (err, dirPathStat) ->
+			
+			time = dirPathStat.mtime
 
-			if err?
-				console.log "[getDirStat] Failed to read directory #{dirPath} due to error - #{err}"
-				callback(null, err)
-				return
+			if dirPathStat.isFile()
+				# if file has expected extension, then calculate size and count
+				if path.extname(dirPath) is @extension
+					fileExtensionCount++
+					fileExtensionSize += dirPathStat.size
+				fileCount++
+				size += dirPathStat.size
+				isFile = true
 
-			# for each internal file or directory
-			for instance in dir
-				# get absolute instance path to get stat
-				instPath = path.join dirPath, instance
-				# get stat
-				do (instPath) ->
-					fs.lstat instPath, (err, instStat) ->
-						if err?
-							console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
-							callback(null, err)
-							return
+				callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+			else
 
-						if instStat.isDirectory()
+				# read directory structure
+				fs.readdir dirPath, (err, dir) ->
+
+					if err?
+						console.log "[getDirStat] Failed to read directory #{dirPath} due to error - #{err}"
+						callback(err)
+						return
+
+					if dir.length is 0
+						callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+						return
+
+					# for each internal file or directory
+					for instance in dir
+						# get absolute instance path to get stat
+						instPath = path.join dirPath, instance
+						# get stat
+						do (instPath) ->
 							# if directory, lets take a look inside
-							getDirStat instPath, false, (stat, err) ->
+							getDirStat instPath, false, (err, stat) ->
+
+								if isFailed
+									return
 
 								if err?
 									console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
-									callback(null, err)
+									callback(err)
 									isFailed = true
 									return
 
+								# calculate directory params
 								fileExtensionCount += stat.fileExtensionCount
 								fileExtensionSize += stat.fileExtensionSize
 								fileCount += stat.fileCount
@@ -187,36 +206,15 @@ module.exports = (basePath, @extension) ->
 
 								if saveChildren
 									children.push
-										isFile: false
+										isFile: stat.isFile
 										name: path.basename instPath
 										size: stat.size
-										time: instStat.mtime
+										time: stat.time
 
 								# check if all data is collected then return the result
 								instCalculated++
 								if instCalculated is dir.length
-									callback({children, size, fileCount, fileExtensionCount, fileExtensionSize})
-
-						else
-
-							# if file has expected extension, then calculate size and count
-							if path.extname(instPath) is @extension
-								fileExtensionCount++
-								fileExtensionSize += instStat.size
-							fileCount++
-							size += instStat.size
-
-							if saveChildren
-								children.push
-									isFile: true
-									name: path.basename instPath
-									size: instStat.size
-									time: instStat.mtime
-
-							# check if all data is collected then return the result
-							instCalculated++
-							if instCalculated is dir.length
-								callback({children, size, fileCount, fileExtensionCount, fileExtensionSize})
+									callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
 
 
 ################################################################################################################################
