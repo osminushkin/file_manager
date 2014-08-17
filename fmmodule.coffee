@@ -203,6 +203,7 @@ module.exports = (basePath, @extension) ->
 								fileExtensionSize += stat.fileExtensionSize
 								fileCount += stat.fileCount
 								size += stat.size
+								isFile = false
 
 								if saveChildren
 									children.push
