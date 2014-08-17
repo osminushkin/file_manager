@@ -216,7 +216,6 @@ module.exports = (basePath, @extension) ->
 								if instCalculated is dir.length
 									callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
 
-
 ################################################################################################################################
 
 	convertTime = (date) ->
