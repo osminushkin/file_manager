@@ -1,0 +1,12 @@
+{
+	"name": "file_manager",
+	"description": "",
+	"version": "0.0.1",
+	"dependencies": 
+	{
+		"express": "3.x",
+		"path": "x",
+		"node-fs": "x",
+		"coffee-script": "x"
+	}
+}
