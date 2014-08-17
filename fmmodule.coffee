@@ -151,6 +151,8 @@ module.exports = (basePath, @extension) ->
 		instCalculated = 0
 		children = []
 		isFailed = false
+		envokeCallback = () ->
+			callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
 
 		fs.lstat dirPath, (err, dirPathStat) ->
 			
@@ -165,7 +167,7 @@ module.exports = (basePath, @extension) ->
 				size += dirPathStat.size
 				isFile = true
 
-				callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+				envokeCallback()
 			else
 
 				# read directory structure
@@ -177,7 +179,7 @@ module.exports = (basePath, @extension) ->
 						return
 
 					if dir.length is 0
-						callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+						envokeCallback()
 						return
 
 					# for each internal file or directory
@@ -215,7 +217,7 @@ module.exports = (basePath, @extension) ->
 								# check if all data is collected then return the result
 								instCalculated++
 								if instCalculated is dir.length
-									callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+									envokeCallback()
 
 ################################################################################################################################
 
