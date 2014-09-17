@@ -1,6 +1,7 @@
 fs = require "fs"
 path = require "path"
 express = require "express"
+async = require "async"
 
 module.exports = (basePath, @extension) ->
 
@@ -78,13 +79,18 @@ module.exports = (basePath, @extension) ->
 							res.status(500).send msg
 							return
 
-						result = sortAndRenderResult req.path, requestedPath, params, sortby, sortorder
-
-						res.status 200
-						res.send result
+						sortAndRenderResult(
+							req.path
+							requestedPath
+							params
+							(result) ->
+								res.status 200
+								res.send result
+							sortby
+							sortorder)
 
 ################################################################################################################################
-	sortAndRenderResult = (path, requestedPath, {children, size, fileCount, fileExtensionCount, fileExtensionSize}, sortby = "name", sortorder = "asc") ->
+	sortAndRenderResult = (path, requestedPath, {children, size, fileCount, fileExtensionCount, fileExtensionSize}, callback, sortby = "name", sortorder = "asc") ->
 
 		result = switch sortby
 			when "name"
@@ -121,19 +127,22 @@ module.exports = (basePath, @extension) ->
 		if requestedPath isnt @targetDirPath
 			toSend += "<tr><td><a href=\"../\">..</a></td><td></td><td></td></tr>"
 
-		for instance in result
-			if instance.isFile
-				toSend += "<tr><td><a href=\"#{instance.name}\">#{instance.name}</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
-			else
-				toSend += "<tr><td><a href=\"#{instance.name}/\">#{instance.name}/..</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
-
-		toSend += "<tr><td colspan=\"3\">Total files count is #{fileCount}</td></tr>"
-		toSend += "<tr><td colspan=\"3\">Total directory size is #{size}</td></tr>"
-		toSend += "<tr><td colspan=\"3\">Total #{@extension} files count is #{fileExtensionCount}</td></tr>"
-		toSend += "<tr><td colspan=\"3\">Total Size of  #{@extension} files is #{fileExtensionSize}</td></tr>"
-		toSend += "</table></body></html>"
-
-		return toSend
+		# Order is important here, so each is not selected
+		async.eachSeries(
+			result
+			(instance, callbackEach) ->
+				if instance.isFile
+					toSend += "<tr><td><a href=\"#{instance.name}\">#{instance.name}</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
+				else
+					toSend += "<tr><td><a href=\"#{instance.name}/\">#{instance.name}/..</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
+				callbackEach()
+			(err) ->
+				toSend += "<tr><td colspan=\"3\">Total files count is #{fileCount}</td></tr>"
+				toSend += "<tr><td colspan=\"3\">Total directory size is #{size}</td></tr>"
+				toSend += "<tr><td colspan=\"3\">Total #{@extension} files count is #{fileExtensionCount}</td></tr>"
+				toSend += "<tr><td colspan=\"3\">Total Size of  #{@extension} files is #{fileExtensionSize}</td></tr>"
+				toSend += "</table></body></html>"
+				callback(toSend))
 ################################################################################################################################
 	sortByName = (a, b) ->
 		keyA = a.name.toLowerCase()
@@ -150,9 +159,8 @@ module.exports = (basePath, @extension) ->
 		isFile = false
 		instCalculated = 0
 		children = []
-		isFailed = false
-		envokeCallback = () ->
-			callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+		envokeCallback = (err) ->
+			if err? then callback err else callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
 
 		fs.lstat dirPath, (err, dirPathStat) ->
 			
@@ -175,29 +183,26 @@ module.exports = (basePath, @extension) ->
 
 					if err?
 						console.log "[getDirStat] Failed to read directory #{dirPath} due to error - #{err}"
-						callback(err)
+						envokeCallback err
 						return
 
 					if dir.length is 0
 						envokeCallback()
 						return
 
-					# for each internal file or directory
-					for instance in dir
-						# get absolute instance path to get stat
-						instPath = path.join dirPath, instance
-						# get stat
-						do (instPath) ->
-							# if directory, lets take a look inside
+					async.each(
+						# An array pased to each
+						dir
+						# Iterator function of each statement
+						(instance, callbackEach) ->
+							# get absolute instance path to get stat
+							instPath = path.join dirPath, instance
+							# get stat
 							getDirStat instPath, false, (err, stat) ->
-
-								if isFailed
-									return
 
 								if err?
 									console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
-									callback(err)
-									isFailed = true
+									callbackEach(err)
 									return
 
 								# calculate directory params
@@ -214,10 +219,15 @@ module.exports = (basePath, @extension) ->
 										size: stat.size
 										time: stat.time
 
-								# check if all data is collected then return the result
-								instCalculated++
-								if instCalculated is dir.length
-									envokeCallback()
+								callbackEach()
+						# callback function of each statement
+						(err) ->
+							if err?
+								console.log "[getDirStat] Failed to get stats of #{dirPath} due to error - #{err}"
+								envokeCallback err
+								return
+							# All data is collected without an error	
+							envokeCallback())
 
 ################################################################################################################################
 
