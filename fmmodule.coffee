@@ -5,7 +5,7 @@ async		= require "async"
 mongoose 	= require "mongoose"
 
 module.exports = (basePath, @extension) ->
-
+	self = this
 	#check specified directory
 	if not fs.existsSync basePath
 		console.log "[fmmodule] Specified path not found"
@@ -37,7 +37,28 @@ module.exports = (basePath, @extension) ->
 
 	FSItemHtmlSchema = mongoose.Schema { html: String, url: String }
 
-	@FSItemHtmlModel = mongoose.model 'FSItem', FSItemHtmlSchema
+	@FSItemHtmlModel = mongoose.model 'FSItemHtml', FSItemHtmlSchema
+
+	FSItemChildSchema = mongoose.Schema {
+		isFile: Boolean,
+		name: String,
+		size: Number,
+		time: Date
+	}
+
+	FSItemSchema = mongoose.Schema {
+		isFile: Boolean,
+		name: String,
+		size: Number,
+		time: Date,
+		url: String,
+		fileCount: Number,
+		fileExtensionCount: Number,
+		fileExtensionSize: Number,
+		children: [FSItemChildSchema]
+	}
+
+	@FSItemModel = mongoose.model 'FSItem', FSItemSchema
 
 	# Get top level directory and add / at the end if necessary
 	basePathNormalize = path.normalize basePath
@@ -86,46 +107,74 @@ module.exports = (basePath, @extension) ->
 					sortby = req.param "sortby"
 					sortorder = req.param "sortorder"
 
+					sortRenderSend = (params) ->
+						sortAndRenderResult	req.path, requestedPath, params
+							, (result) ->
+								# Save request result
+								htmlToSend = new @FSItemHtmlModel {html: result, url: req.url}
+								htmlToSend.save (err) ->
+									if err?
+										console.log "[handleRequest] Failed to save HTML object (url:#{req.url})"
+										console.log err
+										return
+									console.log "[handleRequest] HTML object cashed (url:#{req.url})"
+
+								res.status 200
+								res.send result
+
+							, sortby
+							, sortorder
+
 					# Check is request result is cashed already
-					@FSItemHtmlModel.findOne { "url":req.url }, (err, fsItem) ->
+					@FSItemHtmlModel.findOne { "url": req.url }, (err, fsItemHtml) ->
 
 						# if object found then send it back
-						if fsItem?
-							console.log "[handleRequest] Found cashed object"
+						if fsItemHtml?
+							console.log "[handleRequest] Found cashed HTML object"
 							res.status 200
-							res.send fsItem.html
+							res.send fsItemHtml.html
 							return
 
 						# if failed to read from DB print the error and go forward to read dir structure
 						if err? 
-							console.error "[handleRequest] Failed to get cashed info from DB: #{err}"
+							console.error "[handleRequest] Failed to get cashed HTML object from DB: #{err}"
 
-						# read directory structure and send back
-						console.log "[handleRequest] read #{requestedPath}"
-						getDirStat requestedPath, true, (err, params) ->
+						console.log "[handleRequest] Cashed HTML object not found"
 
-							if err?
-								msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
-								console.error "[handleRequest] #{msg}"
-								res.status(500).send msg
+						# Sorted and rendered object not found, lets try to find unsorted then
+						self.FSItemModel.findOne { "url": req.path }, (err, fsItem) ->
+							# if object found then sort and render it and send back
+							if fsItem?
+								console.log "[handleRequest] Found cashed object"
+								sortRenderSend fsItem
 								return
 
-							sortAndRenderResult	req.path, requestedPath, params
-								, (result) ->
-									# Save request result
-									htmlToSend = new @FSItemHtmlModel {html: result, url: req.url}
-									htmlToSend.save (err) ->
-										if err?
-											console.log "[handleRequest] Failed to save request result (url:#{req.path})"
-											console.log err
-											return
-										console.log "[handleRequest] Request result cashed"
+							if err? 
+								console.error "[handleRequest] Failed to get cashed info from DB: #{err}"
 
-									res.status 200
-									res.send result
+							console.log "[handleRequest] Cashed object not found"
 
-								, sortby
-								, sortorder
+							# read directory structure and send back
+							console.log "[handleRequest] read #{requestedPath}"
+							getDirStat requestedPath, true, (err, params) ->
+
+								if err?
+									msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
+									console.error "[handleRequest] #{msg}"
+									res.status(500).send msg
+									return
+
+								# Save request result
+								params.url = req.path
+								htmlToSend = new @FSItemModel params
+								htmlToSend.save (err) ->
+									if err?
+										console.log "[handleRequest] Failed to save object (url:#{req.path})"
+										console.log err
+										return
+									console.log "[handleRequest] Object cashed (url:#{req.path})"
+
+								sortRenderSend params
 
 ################################################################################################################################
 	sortAndRenderResult = (path, requestedPath, {children, size, fileCount, fileExtensionCount, fileExtensionSize}, callback, sortby = "name", sortorder = "asc") ->
