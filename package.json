@@ -7,6 +7,8 @@
 		"express": "3.x",
 		"path": "x",
 		"node-fs": "x",
-		"coffee-script": "x"
+		"coffee-script": "x",
+		"async": "x",
+		"mongoose": "x"
 	}
 }

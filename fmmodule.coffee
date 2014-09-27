@@ -1,7 +1,8 @@
-fs = require "fs"
-path = require "path"
-express = require "express"
-async = require "async"
+fs 			= require "fs"
+path 		= require "path"
+express 	= require "express"
+async		= require "async"
+mongoose 	= require "mongoose"
 
 module.exports = (basePath, @extension) ->
 
@@ -13,6 +14,31 @@ module.exports = (basePath, @extension) ->
 		console.log "[fmmodule] Provided path is not a directory"
 		return
 
+	mongoose.connect "mongodb://localhost/file_manager"
+
+	mongoose.connection.on "error", (err) ->
+		console.error "connection error: #{err.message}"
+		process.exit()
+	mongoose.connection.once "open", () ->
+		console.log "Connected to DB!"
+
+		# Init server here to prevent incoming requests before connetion to DB established
+		app = express()
+
+		app.get "/favicon.ico", (req, res) ->
+			res.status(500).send "Zadolbal etot favicon"
+
+		app.get "/*", (req, res) ->
+			console.log "[GET] to " + req.path
+			handleRequest req, res
+		
+		app.listen 3600
+		console.log "[fmmodule] listening port " + 3600
+
+	FSItemHtmlSchema = mongoose.Schema { html: String, url: String }
+
+	@FSItemHtmlModel = mongoose.model 'FSItem', FSItemHtmlSchema
+
 	# Get top level directory and add / at the end if necessary
 	basePathNormalize = path.normalize basePath
 	# Chech basePath on / at the end of the string
@@ -20,15 +46,6 @@ module.exports = (basePath, @extension) ->
 
 	console.log "[fmmodule] Top level directory #{@targetDirPath}"
 	console.log "[fmmodule] Target extension #{@extension}"
-
-	app = express()
-
-	app.get "/*", (req, res) ->
-		console.log "[GET] to " + req.path
-		handleRequest req, res
-	
-	app.listen 3600
-	console.log "[fmmodule] listening port " + 3600
 
 ################################################################################################################################
 	handleRequest = (req, res) ->
@@ -69,25 +86,46 @@ module.exports = (basePath, @extension) ->
 					sortby = req.param "sortby"
 					sortorder = req.param "sortorder"
 
-					console.log "[readDirectory] read #{requestedPath}"
-					# read directory structure
-					getDirStat requestedPath, true, (err, params) ->
+					# Check is request result is cashed already
+					@FSItemHtmlModel.findOne { "url":req.url }, (err, fsItem) ->
 
-						if err?
-							msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
-							console.error "[readDirectory] #{msg}"
-							res.status(500).send msg
+						# if object found then send it back
+						if fsItem?
+							console.log "[handleRequest] Found cashed object"
+							res.status 200
+							res.send fsItem.html
 							return
 
-						sortAndRenderResult(
-							req.path
-							requestedPath
-							params
-							(result) ->
-								res.status 200
-								res.send result
-							sortby
-							sortorder)
+						# if failed to read from DB print the error and go forward to read dir structure
+						if err? 
+							console.error "[handleRequest] Failed to get cashed info from DB: #{err}"
+
+						# read directory structure and send back
+						console.log "[handleRequest] read #{requestedPath}"
+						getDirStat requestedPath, true, (err, params) ->
+
+							if err?
+								msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
+								console.error "[handleRequest] #{msg}"
+								res.status(500).send msg
+								return
+
+							sortAndRenderResult	req.path, requestedPath, params
+								, (result) ->
+									# Save request result
+									htmlToSend = new @FSItemHtmlModel {html: result, url: req.url}
+									htmlToSend.save (err) ->
+										if err?
+											console.log "[handleRequest] Failed to save request result (url:#{req.path})"
+											console.log err
+											return
+										console.log "[handleRequest] Request result cashed"
+
+									res.status 200
+									res.send result
+
+								, sortby
+								, sortorder
 
 ################################################################################################################################
 	sortAndRenderResult = (path, requestedPath, {children, size, fileCount, fileExtensionCount, fileExtensionSize}, callback, sortby = "name", sortorder = "asc") ->
@@ -128,21 +166,22 @@ module.exports = (basePath, @extension) ->
 			toSend += "<tr><td><a href=\"../\">..</a></td><td></td><td></td></tr>"
 
 		# Order is important here, so each is not selected
-		async.eachSeries(
-			result
-			(instance, callbackEach) ->
+		async.mapSeries result
+			, (instance, next) ->
+				itemHtml = ""
 				if instance.isFile
-					toSend += "<tr><td><a href=\"#{instance.name}\">#{instance.name}</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
+					itemHtml = "<tr><td><a href=\"#{instance.name}\">#{instance.name}</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
 				else
-					toSend += "<tr><td><a href=\"#{instance.name}/\">#{instance.name}/..</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
-				callbackEach()
-			(err) ->
+					itemHtml = "<tr><td><a href=\"#{instance.name}/\">#{instance.name}/..</a></td><td>#{instance.size}</td><td>#{convertTime(instance.time)}</td></tr>"
+				next null, itemHtml
+			, (err, results) ->
+				toSend += results.join ""
 				toSend += "<tr><td colspan=\"3\">Total files count is #{fileCount}</td></tr>"
 				toSend += "<tr><td colspan=\"3\">Total directory size is #{size}</td></tr>"
 				toSend += "<tr><td colspan=\"3\">Total #{@extension} files count is #{fileExtensionCount}</td></tr>"
 				toSend += "<tr><td colspan=\"3\">Total Size of  #{@extension} files is #{fileExtensionSize}</td></tr>"
 				toSend += "</table></body></html>"
-				callback(toSend))
+				callback toSend
 ################################################################################################################################
 	sortByName = (a, b) ->
 		keyA = a.name.toLowerCase()
@@ -190,11 +229,9 @@ module.exports = (basePath, @extension) ->
 						envokeCallback()
 						return
 
-					async.each(
-						# An array pased to each
-						dir
+					async.each dir
 						# Iterator function of each statement
-						(instance, callbackEach) ->
+						, (instance, next) ->
 							# get absolute instance path to get stat
 							instPath = path.join dirPath, instance
 							# get stat
@@ -202,7 +239,7 @@ module.exports = (basePath, @extension) ->
 
 								if err?
 									console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
-									callbackEach(err)
+									next(err)
 									return
 
 								# calculate directory params
@@ -219,15 +256,15 @@ module.exports = (basePath, @extension) ->
 										size: stat.size
 										time: stat.time
 
-								callbackEach()
+								next()
 						# callback function of each statement
-						(err) ->
+						, (err) ->
 							if err?
 								console.log "[getDirStat] Failed to get stats of #{dirPath} due to error - #{err}"
 								envokeCallback err
 								return
 							# All data is collected without an error	
-							envokeCallback())
+							envokeCallback()
 
 ################################################################################################################################
 
