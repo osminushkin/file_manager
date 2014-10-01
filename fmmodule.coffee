@@ -22,40 +22,17 @@ module.exports = (basePath, @extension) ->
 	mongoose.connection.once "open", () ->
 		console.log "Connected to DB!"
 
-		# Init server here to prevent incoming requests before connetion to DB established
-		app = express()
-
-		app.get "/favicon.ico", (req, res) ->
-			res.status(500).send "Zadolbal etot favicon"
-
-		app.get "/*", (req, res) ->
-			console.log "[GET] to " + req.path
-			handleRequest req, res
-		
-		app.listen 3600
-		console.log "[fmmodule] listening port " + 3600
-
-	FSItemHtmlSchema = mongoose.Schema { html: String, url: String }
-
-	@FSItemHtmlModel = mongoose.model 'FSItemHtml', FSItemHtmlSchema
-
-	FSItemChildSchema = mongoose.Schema {
-		isFile: Boolean,
-		name: String,
-		size: Number,
-		time: Date
-	}
-
-	FSItemSchema = mongoose.Schema {
+	FSItemSchema = new mongoose.Schema {
 		isFile: Boolean,
 		name: String,
 		size: Number,
 		time: Date,
-		url: String,
+		url: {type: String, unique: true},
 		fileCount: Number,
 		fileExtensionCount: Number,
 		fileExtensionSize: Number,
-		children: [FSItemChildSchema]
+		children: [String]
+		createdAt: { type: Date, expires: 180, default: Date.now }
 	}
 
 	@FSItemModel = mongoose.model 'FSItem', FSItemSchema
@@ -68,117 +45,134 @@ module.exports = (basePath, @extension) ->
 	console.log "[fmmodule] Top level directory #{@targetDirPath}"
 	console.log "[fmmodule] Target extension #{@extension}"
 
+	# Init server here to prevent incoming requests before connetion to DB established
+	app = express()
+
+	app.get "/favicon.ico", (req, res) ->
+		res.status(500).send "Zadolbal etot favicon"
+
+	app.get "/*", (req, res) ->
+		console.log "[GET] to " + req.path
+		handleRequest req, res
+	
+	app.listen 3600
+	console.log "[fmmodule] listening port " + 3600
+
 ################################################################################################################################
 	handleRequest = (req, res) ->
 
 		# calculate path of requested directory
 		requestedPath = path.normalize(@targetDirPath + req.path)
+		# exclude last /
+		requestedPath = path.join path.dirname(requestedPath), path.basename(requestedPath)
 
-		# check is requested path exists
-		fs.exists requestedPath, (exists) ->
+		# how to sort files and sub directories
+		sortby = req.param "sortby"
+		sortorder = req.param "sortorder"
 
-			if not exists
-				msg = "Requested path not found: #{requestedPath}"
-				console.log "[handleRequest] #{msg}"
-				res.status(500).send msg
-				return
+		sortRenderSend = (params) ->
+			sortAndRenderResult	req.path, requestedPath, params
+				, (result) ->
+					res.status 200
+					res.send result
 
-			fs.lstat requestedPath, (err, stats) ->
-				if err?
-					msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
-					console.error "[handleRequest] #{msg}"
-					res.status(500).send msg
-					return
-				
-				# if requested path is file then send it
-				if stats.isFile()
+				, sortby
+				, sortorder
+
+		# Check is request result cached
+		FSItemModel.findOne { url : requestedPath }, (err, fsItem) ->
+			if fsItem?
+				console.log "[handleRequest] FS item found in DB (url:#{req.path})"
+				# if fs item is file then send it
+				if fsItem.isFile
 					res.status(200).download requestedPath
-
-				# if directory - read structure
 				else
+					# Get all children from DB
+					FSItemModel.find { url : { $in : fsItem.children } }, (err, chFSItems) ->
+						if err?
+							console.log "[handleRequest] Failed to get children from DB (url:#{req.path})"
+							return
+						console.log "[handleRequest] Children found in DB (url:#{req.path})"
 
-					# if directory and request without / then redirect to path + /
-					if req.path.search(/.*\/$/) is -1
-						console.log "[handleRequest] Redirect to " + req.path + "/"
-						res.redirect req.path + "/"
+						# create array of found children's urls
+						foundChildrenUrls = chFSItems.map (chFSItem) ->
+							chFSItem.url
+
+						# and get the difference between expected and found
+						notFoundChildren = []
+						fsItem.children.forEach (child) ->
+							if foundChildrenUrls.indexOf(child) is -1 then notFoundChildren.push child
+
+						# For each not found in DB children 
+						async.map notFoundChildren
+							, (child, next) ->
+								getDirStat child
+									, (err, params, next) ->
+										if err?
+											next err
+											return
+										next null, params
+									, next
+
+							, (err, updatedChildren) ->
+								if err?
+									res.status(500).send msg
+									return
+								# join found in DB children with just fetched
+								allChildren = chFSItems.concat updatedChildren
+								sortRenderSend {
+									children:allChildren,
+									size:fsItem.size,
+									fileCount:fsItem.fileCount,
+									fileExtensionCount:fsItem.fileExtensionCount,
+									fileExtensionSize:fsItem.fileExtensionSize
+								}
+			else
+				console.log "[handleRequest] cached object not found"
+
+				# check is requested path exists
+				fs.exists requestedPath, (exists) ->
+
+					if not exists
+						msg = "Requested path not found: #{req.path}"
+						console.log "[handleRequest] #{msg}"
+						res.status(500).send msg
 						return
 
-					# how to sort files and sub directories
-					sortby = req.param "sortby"
-					sortorder = req.param "sortorder"
-
-					sortRenderSend = (params) ->
-						sortAndRenderResult	req.path, requestedPath, params
-							, (result) ->
-								# Save request result
-								htmlToSend = new @FSItemHtmlModel {html: result, url: req.url}
-								htmlToSend.save (err) ->
-									if err?
-										console.log "[handleRequest] Failed to save HTML object (url:#{req.url})"
-										console.log err
-										return
-									console.log "[handleRequest] HTML object cashed (url:#{req.url})"
-
-								res.status 200
-								res.send result
-
-							, sortby
-							, sortorder
-
-					# Check is request result is cashed already
-					@FSItemHtmlModel.findOne { "url": req.url }, (err, fsItemHtml) ->
-
-						# if object found then send it back
-						if fsItemHtml?
-							console.log "[handleRequest] Found cashed HTML object"
-							res.status 200
-							res.send fsItemHtml.html
+					fs.lstat requestedPath, (err, stats) ->
+						if err?
+							msg = "Failed to get stats of #{req.path} due to error - #{err}"
+							console.error "[handleRequest] #{msg}"
+							res.status(500).send msg
 							return
+						
+						# if requested path is file then send it
+						if stats.isFile()
+							res.status(200).download requestedPath
 
-						# if failed to read from DB print the error and go forward to read dir structure
-						if err? 
-							console.error "[handleRequest] Failed to get cashed HTML object from DB: #{err}"
-
-						console.log "[handleRequest] Cashed HTML object not found"
-
-						# Sorted and rendered object not found, lets try to find unsorted then
-						self.FSItemModel.findOne { "url": req.path }, (err, fsItem) ->
-							# if object found then sort and render it and send back
-							if fsItem?
-								console.log "[handleRequest] Found cashed object"
-								sortRenderSend fsItem
+						# if directory - read structure
+						else
+							# if directory and request without / then redirect to path + /
+							if req.path.search(/.*\/$/) is -1
+								console.log "[handleRequest] Redirect to " + req.path + "/"
+								res.redirect req.path + "/"
 								return
 
-							if err? 
-								console.error "[handleRequest] Failed to get cashed info from DB: #{err}"
-
-							console.log "[handleRequest] Cashed object not found"
-
-							# read directory structure and send back
-							console.log "[handleRequest] read #{requestedPath}"
-							getDirStat requestedPath, true, (err, params) ->
+							# read directory structure
+							console.log "[handleRequest] read #{req.path}"
+							getDirStat requestedPath, (err, params) ->
 
 								if err?
-									msg = "Failed to get stats of #{requestedPath} due to error - #{err}"
+									msg = "Failed to get stats of #{req.path} due to error - #{err}"
 									console.error "[handleRequest] #{msg}"
 									res.status(500).send msg
 									return
 
-								# Save request result
-								params.url = req.path
-								htmlToSend = new @FSItemModel params
-								htmlToSend.save (err) ->
-									if err?
-										console.log "[handleRequest] Failed to save object (url:#{req.path})"
-										console.log err
-										return
-									console.log "[handleRequest] Object cashed (url:#{req.path})"
-
 								sortRenderSend params
 
+								
 ################################################################################################################################
 	sortAndRenderResult = (path, requestedPath, {children, size, fileCount, fileExtensionCount, fileExtensionSize}, callback, sortby = "name", sortorder = "asc") ->
-
 		result = switch sortby
 			when "name"
 				children.sort (a, b) ->
@@ -211,7 +205,7 @@ module.exports = (basePath, @extension) ->
 				"""
 
 		# if top dir then skip .. element
-		if requestedPath isnt @targetDirPath
+		if requestedPath + path.sep isnt @targetDirPath
 			toSend += "<tr><td><a href=\"../\">..</a></td><td></td><td></td></tr>"
 
 		# Order is important here, so each is not selected
@@ -237,7 +231,7 @@ module.exports = (basePath, @extension) ->
 		keyB = b.name.toLowerCase()
 		if keyA > keyB then 1 else if keyA < keyB then -1 else 0
 ################################################################################################################################
-	getDirStat = (dirPath, saveChildren, callback) ->
+	getDirStat = (dirPath, callback, next) ->
 
 		fileCount = 0
 		fileExtensionCount = 0
@@ -247,8 +241,14 @@ module.exports = (basePath, @extension) ->
 		isFile = false
 		instCalculated = 0
 		children = []
+		name = path.basename dirPath
+		url = dirPath
+
 		envokeCallback = (err) ->
-			if err? then callback err else callback(null, {isFile, children, size, time, fileCount, fileExtensionCount, fileExtensionSize})
+			if err? then callback err else callback(null, {isFile, name, url, children, size, time, fileCount, fileExtensionCount, fileExtensionSize}, next)
+
+		saveToDb = () ->
+			cacheData {isFile, name, url, children, size, time, fileCount, fileExtensionCount, fileExtensionSize}
 
 		fs.lstat dirPath, (err, dirPathStat) ->
 			
@@ -263,6 +263,7 @@ module.exports = (basePath, @extension) ->
 				size += dirPathStat.size
 				isFile = true
 
+				saveToDb()
 				envokeCallback()
 			else
 
@@ -275,6 +276,7 @@ module.exports = (basePath, @extension) ->
 						return
 
 					if dir.length is 0
+						saveToDb()
 						envokeCallback()
 						return
 
@@ -284,7 +286,7 @@ module.exports = (basePath, @extension) ->
 							# get absolute instance path to get stat
 							instPath = path.join dirPath, instance
 							# get stat
-							getDirStat instPath, false, (err, stat) ->
+							getDirStat instPath, (err, stat) ->
 
 								if err?
 									console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
@@ -298,12 +300,16 @@ module.exports = (basePath, @extension) ->
 								size += stat.size
 								isFile = false
 
-								if saveChildren
-									children.push
-										isFile: stat.isFile
-										name: path.basename instPath
-										size: stat.size
-										time: stat.time
+								children.push
+									isFile: stat.isFile
+									name: stat.name
+									url: stat.url
+									size: stat.size
+									time: stat.time
+									fileCount: stat.fileCount
+									fileExtensionCount: stat.fileExtensionCount
+									fileExtensionSize: stat.fileExtensionSize
+									children: stat.children
 
 								next()
 						# callback function of each statement
@@ -312,11 +318,28 @@ module.exports = (basePath, @extension) ->
 								console.log "[getDirStat] Failed to get stats of #{dirPath} due to error - #{err}"
 								envokeCallback err
 								return
-							# All data is collected without an error	
+							# All data is collected without an error
+							saveToDb()
 							envokeCallback()
 
 ################################################################################################################################
+	cacheData = (params) ->
+		# change real children objects by links
+		childrenLinks = params.children.map (child)->
+			child.url
+		
+		params.children = childrenLinks
+		params.createdAt = Date.now()
 
+		self.FSItemModel.findOneAndUpdate { url: params.url }, params, { upsert: true }, (err, fsItem)->
+			if err?
+				console.log "[handleRequest] Failed to save object (url:#{params.url})"
+				console.log err
+				return
+			console.log "[handleRequest] Object cached (url:#{params.url})"
+
+
+################################################################################################################################
 	convertTime = (date) ->
 
 		day = toStringLength2 date.getDay()
@@ -325,6 +348,7 @@ module.exports = (basePath, @extension) ->
 		hour = toStringLength2 date.getHours()
 		min = toStringLength2 date.getMinutes()
 		return day + "-" + month + "-" + year +  "&nbsp;&nbsp;&nbsp;&nbsp;" + hour + ":" + min
-
+################################################################################################################################
 	toStringLength2 = (number) ->
 		if number < 10 then "0" + number else number
+################################################################################################################################

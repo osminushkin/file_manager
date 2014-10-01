@@ -1,2 +1,2 @@
 fm = require './fmmodule'
-fm 'e:/test', '.js'
+fm '/home/xserosm/test', '.js'
