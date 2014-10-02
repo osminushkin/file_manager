@@ -250,6 +250,24 @@ module.exports = (basePath, @extension) ->
 		saveToDb = () ->
 			cacheData {isFile, name, url, children, size, time, fileCount, fileExtensionCount, fileExtensionSize}
 
+		updateStatisticForDir = (stat) ->
+			fileExtensionCount += stat.fileExtensionCount
+			fileExtensionSize += stat.fileExtensionSize
+			fileCount += stat.fileCount
+			size += stat.size
+			isFile = false
+
+			children.push
+				isFile: stat.isFile
+				name: stat.name
+				url: stat.url
+				size: stat.size
+				time: stat.time
+				fileCount: stat.fileCount
+				fileExtensionCount: stat.fileExtensionCount
+				fileExtensionSize: stat.fileExtensionSize
+				children: stat.children
+
 		fs.lstat dirPath, (err, dirPathStat) ->
 			
 			time = dirPathStat.mtime
@@ -268,59 +286,68 @@ module.exports = (basePath, @extension) ->
 			else
 
 				# read directory structure
-				fs.readdir dirPath, (err, dir) ->
+				fs.readdir dirPath, (err, dirChildren) ->
 
 					if err?
 						console.log "[getDirStat] Failed to read directory #{dirPath} due to error - #{err}"
 						envokeCallback err
 						return
 
-					if dir.length is 0
+					if dirChildren.length is 0
 						saveToDb()
 						envokeCallback()
 						return
 
-					async.each dir
-						# Iterator function of each statement
-						, (instance, next) ->
-							# get absolute instance path to get stat
-							instPath = path.join dirPath, instance
-							# get stat
-							getDirStat instPath, (err, stat) ->
+					# create array of required children's urls
+					dirChildrenUrls = dirChildren.map (dirChild) ->
+						path.join dirPath, dirChild
 
+					# Check is there any cached children
+					FSItemModel.find { url : { $in : dirChildrenUrls } }, (err, foundChildren) ->
+						if err?
+							console.log "[getDirStat] Failed to get children from DB (url:#{req.path})"
+							return
+
+						console.log "[getDirStat] Found #{foundChildren.length} children in DB (url:#{dirPath})"
+
+						# create array of found children's urls
+						foundChildrenUrls = []
+						# and also in the same cycle apply found statistic to current directory
+						foundChildren.forEach (foundChild) ->
+							console.log "[getDirStat] Child (url:#{foundChild.url})"
+							foundChildrenUrls.push foundChild.url
+							updateStatisticForDir foundChild
+
+						# get the difference between expected and found
+						notCachedChildren = []
+						dirChildrenUrls.forEach (child) ->
+							if foundChildrenUrls.indexOf(child) is -1 then notCachedChildren.push child
+
+						# and now for each not cached child get info and accumulate with found in DB
+						async.each notCachedChildren
+							# Iterator function of each statement
+							, (instPath, next) ->
+								# get stat
+								getDirStat instPath, (err, stat) ->
+									if err?
+										console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
+										next(err)
+										return
+									console.log "[getDirStat] Got statistic for item (url:#{stat.url})"
+									# calculate directory params
+									updateStatisticForDir stat
+
+									next()
+							# callback function of each statement
+							, (err) ->
 								if err?
-									console.log "[getDirStat] Failed to get stats of #{instPath} due to error - #{err}"
-									next(err)
+									console.log "[getDirStat] Failed to get stats of #{dirPath} due to error - #{err}"
+									envokeCallback err
 									return
-
-								# calculate directory params
-								fileExtensionCount += stat.fileExtensionCount
-								fileExtensionSize += stat.fileExtensionSize
-								fileCount += stat.fileCount
-								size += stat.size
-								isFile = false
-
-								children.push
-									isFile: stat.isFile
-									name: stat.name
-									url: stat.url
-									size: stat.size
-									time: stat.time
-									fileCount: stat.fileCount
-									fileExtensionCount: stat.fileExtensionCount
-									fileExtensionSize: stat.fileExtensionSize
-									children: stat.children
-
-								next()
-						# callback function of each statement
-						, (err) ->
-							if err?
-								console.log "[getDirStat] Failed to get stats of #{dirPath} due to error - #{err}"
-								envokeCallback err
-								return
-							# All data is collected without an error
-							saveToDb()
-							envokeCallback()
+								console.log "[getDirStat] All data collected for item (url:#{url})"
+								# All data is collected without an error
+								saveToDb()
+								envokeCallback()
 
 ################################################################################################################################
 	cacheData = (params) ->
